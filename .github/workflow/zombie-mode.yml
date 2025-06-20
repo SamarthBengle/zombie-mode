@@ -1,0 +1,68 @@
+name: Zombie Mode Release
+
+on:
+  schedule:
+    - cron: '0 9 * * *'  # Daily at 9 AM for testing
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  check-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get latest release
+        id: latest_release
+        run: |
+          LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+          echo "latest_tag=$LATEST_TAG" >> $GITHUB_OUTPUT
+          echo "Latest release: $LATEST_TAG"
+
+      - name: Check for dependency updates since last release
+        id: check_updates
+        run: |
+          if [[ "${{ steps.latest_release.outputs.latest_tag }}" == "v0.0.0" ]]; then
+            echo "No previous releases found, will create initial release"
+            echo "dependency_commits=1" >> $GITHUB_OUTPUT
+          else
+            echo "Checking commits since ${{ steps.latest_release.outputs.latest_tag }}"
+            DEPENDENCY_COMMITS=$(git log ${{ steps.latest_release.outputs.latest_tag }}..HEAD --oneline --author="dependabot[bot]" | wc -l)
+            echo "dependency_commits=$DEPENDENCY_COMMITS" >> $GITHUB_OUTPUT
+          fi
+          
+          echo "Dependency commits found: ${{ steps.check_updates.outputs.dependency_commits }}"
+
+      - name: Create minor release
+        if: steps.check_updates.outputs.dependency_commits > 0
+        run: |
+          # Calculate next minor version
+          LATEST_TAG="${{ steps.latest_release.outputs.latest_tag }}"
+          if [[ $LATEST_TAG == "v0.0.0" ]]; then
+            NEW_VERSION="v1.0.0"
+          else
+            # Extract version numbers and increment minor
+            VERSION=${LATEST_TAG#v}
+            MAJOR=$(echo $VERSION | cut -d. -f1)
+            MINOR=$(echo $VERSION | cut -d. -f2)
+            NEW_MINOR=$((MINOR + 1))
+            NEW_VERSION="v${MAJOR}.${NEW_MINOR}.0"
+          fi
+          
+          echo "Creating release: $NEW_VERSION"
+          
+          # Create and push tag
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$NEW_VERSION" -m "Zombie mode release: $NEW_VERSION"
+          git push origin "$NEW_VERSION"
+          
+          # Create GitHub release
+          gh release create "$NEW_VERSION" \
+            --title "Zombie Release $NEW_VERSION" \
+            --notes "Automated release created by zombie mode workflow"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
