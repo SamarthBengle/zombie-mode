@@ -10,6 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -30,16 +31,16 @@ jobs:
             echo "dependency_commits=1" >> $GITHUB_OUTPUT
           else
             echo "Checking commits since ${{ steps.latest_release.outputs.latest_tag }}"
-            DEPENDENCY_COMMITS=$(git log ${{ steps.latest_release.outputs.latest_tag }}..HEAD --oneline --author="dependabot[bot]" | wc -l)
+            DEPENDENCY_COMMITS=$(git log ${{ steps.latest_release.outputs.latest_tag }}..HEAD --oneline --grep="Bump\|dependabot" | wc -l)
             echo "dependency_commits=$DEPENDENCY_COMMITS" >> $GITHUB_OUTPUT
           fi
           
           echo "Dependency commits found: ${{ steps.check_updates.outputs.dependency_commits }}"
 
-      - name: Create minor release
+      - name: Calculate next version
         if: steps.check_updates.outputs.dependency_commits > 0
+        id: version
         run: |
-          # Calculate next minor version
           LATEST_TAG="${{ steps.latest_release.outputs.latest_tag }}"
           if [[ $LATEST_TAG == "v0.0.0" ]]; then
             NEW_VERSION="v1.0.0"
@@ -51,18 +52,73 @@ jobs:
             NEW_MINOR=$((MINOR + 1))
             NEW_VERSION="v${MAJOR}.${NEW_MINOR}.0"
           fi
+          echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+          echo "Next version: $NEW_VERSION"
+
+      - name: Check if release PR already exists
+        if: steps.check_updates.outputs.dependency_commits > 0
+        id: check_pr
+        run: |
+          EXISTING_PR=$(gh pr list --base main --head "zombie-release-${{ steps.version.outputs.new_version }}" --json number --jq '.[0].number // empty')
+          if [[ -n "$EXISTING_PR" ]]; then
+            echo "pr_exists=true" >> $GITHUB_OUTPUT
+            echo "existing_pr_number=$EXISTING_PR" >> $GITHUB_OUTPUT
+            echo "Release PR already exists: #$EXISTING_PR"
+          else
+            echo "pr_exists=false" >> $GITHUB_OUTPUT
+            echo "No existing release PR found"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create release branch and update version
+        if: steps.check_updates.outputs.dependency_commits > 0 && steps.check_pr.outputs.pr_exists == 'false'
+        run: |
+          NEW_VERSION="${{ steps.version.outputs.new_version }}"
           
-          echo "Creating release: $NEW_VERSION"
-          
-          # Create and push tag
+          # Configure git
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -a "$NEW_VERSION" -m "Zombie mode release: $NEW_VERSION"
-          git push origin "$NEW_VERSION"
           
-          # Create GitHub release
-          gh release create "$NEW_VERSION" \
-            --title "Zombie Release $NEW_VERSION" \
-            --notes "Automated release created by zombie mode workflow"
+          # Create release branch
+          git checkout -b "zombie-release-$NEW_VERSION"
+          
+          # Update version in pom.xml if it exists (Maven project)
+          if [ -f "pom.xml" ]; then
+            MAVEN_VERSION=${NEW_VERSION#v}  # Remove 'v' prefix for Maven
+            mvn versions:set -DnewVersion=$MAVEN_VERSION -DgenerateBackupPoms=false || echo "Maven version update failed, continuing..."
+            if [ -f "pom.xml" ]; then
+              git add pom.xml
+              git commit -m "🧟‍♂️ Update version to $MAVEN_VERSION" || echo "No changes to commit"
+            fi
+          fi
+          
+          # Push the branch
+          git push origin "zombie-release-$NEW_VERSION"
+
+      - name: Create release PR
+        if: steps.check_updates.outputs.dependency_commits > 0 && steps.check_pr.outputs.pr_exists == 'false'
+        run: |
+          NEW_VERSION="${{ steps.version.outputs.new_version }}"
+          LATEST_TAG="${{ steps.latest_release.outputs.latest_tag }}"
+          
+          # Generate changelog of dependency updates
+          CHANGES=$(git log $LATEST_TAG..HEAD --oneline --grep="Bump\|dependabot" --pretty=format:"- %s" | head -20)
+          
+          # Calculate auto-merge date (3 days from now)
+          AUTO_MERGE_DATE=$(date -d '+3 days' '+%Y-%m-%d %H:%M UTC')
+          
+          # Create PR body - simple single line to avoid formatting issues
+          PR_BODY="Zombie Release: $NEW_VERSION - Dependencies updated since $LATEST_TAG - Auto-merge: $AUTO_MERGE_DATE"
+          
+          # Create the PR
+          gh pr create \
+            --title "Zombie Release: $NEW_VERSION" \
+            --body "$PR_BODY" \
+            --base main \
+            --head "zombie-release-$NEW_VERSION" \
+            --label "zombie-mode,dependencies,auto-merge"
+          
+          echo "Created release PR for $NEW_VERSION"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
