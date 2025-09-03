@@ -1,0 +1,62 @@
+name: Auto-merge Zombie Release PRs
+
+on:
+  schedule:
+    - cron: '0 12 * * *'  # Daily at noon - check for PRs to auto-merge
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  auto-merge-aged-prs:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      contents: write
+    steps:
+      - name: Auto-merge aged zombie release PRs
+        run: |
+          echo "Checking for zombie release PRs older than 3 days..."
+          
+          # Get current timestamp (3 days ago)
+          CUTOFF_DATE=$(date -d '3 days ago' --iso-8601=seconds)
+          echo "Cutoff date: $CUTOFF_DATE"
+          
+          # Find zombie release PRs older than 3 days
+          gh pr list \
+            --label "zombie-mode" \
+            --state "open" \
+            --json number,createdAt,title \
+            --jq --arg cutoff "$CUTOFF_DATE" \
+            '.[] | select(.createdAt < $cutoff) | .number' > aged_prs.txt
+          
+          # Check if we found any aged PRs
+          if [ ! -s aged_prs.txt ]; then
+            echo "No aged zombie release PRs found"
+            exit 0
+          fi
+          
+          echo "Found aged zombie release PRs:"
+          cat aged_prs.txt
+          
+          # Auto-merge each aged PR
+          while read pr_number; do
+            if [ -n "$pr_number" ]; then
+              echo "Auto-merging aged zombie release PR #$pr_number"
+          
+              # Add a comment before merging
+              gh pr comment $pr_number --body "Auto-merging after 3-day timeout period."
+          
+              # Merge the PR
+              gh pr merge $pr_number --squash --delete-branch
+          
+              if [ $? -eq 0 ]; then
+                echo "Successfully auto-merged PR #$pr_number"
+              else
+                echo "Failed to auto-merge PR #$pr_number"
+              fi
+            fi
+          done < aged_prs.txt
+          
+          # Cleanup
+          rm -f aged_prs.txt
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
